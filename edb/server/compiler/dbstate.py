@@ -176,9 +176,7 @@ class Param:
 
 
 @dataclasses.dataclass
-class QueryUnit:
-
-    sql: Tuple[bytes, ...]
+class BaseQueryUnit:
 
     # Status-line for the compiled command; returned to front-end
     # in a CommandComplete protocol message if the command is
@@ -203,10 +201,6 @@ class QueryUnit:
     # True if this unit contains ALTER/DROP/CREATE ROLE commands.
     has_role_ddl: bool = False
 
-    # If tx_id is set, it means that the unit
-    # starts a new transaction.
-    tx_id: Optional[int] = None
-
     # True if this unit is single 'COMMIT' command.
     # 'COMMIT' is always compiled to a separate QueryUnit.
     tx_commit: bool = False
@@ -221,6 +215,25 @@ class QueryUnit:
 
     # True if it is safe to cache this unit.
     cacheable: bool = False
+
+    in_type_data: bytes = sertypes.NULL_TYPE_DESC
+    in_type_id: bytes = sertypes.NULL_TYPE_ID.bytes
+    in_type_args: Optional[List[Param]] = None
+    globals: Optional[List[str]] = None
+
+    @property
+    def has_ddl(self) -> bool:
+        return bool(self.capabilities & enums.Capability.DDL)
+
+
+@dataclasses.dataclass
+class QueryUnit(BaseQueryUnit):
+
+    sql: Tuple[bytes, ...]
+
+    # If tx_id is set, it means that the unit
+    # starts a new transaction.
+    tx_id: Optional[int] = None
 
     # If non-None, contains a name of the DB that is about to be
     # created/deleted. If it's the former, the IO process needs to
@@ -238,17 +251,11 @@ class QueryUnit:
     # with the indicated ID.
     ddl_stmt_id: Optional[str] = None
 
-    # Cardinality of the result set.  Set to NO_RESULT if the
-    # unit represents multiple queries compiled as one script.
-    cardinality: enums.Cardinality = \
-        enums.Cardinality.NO_RESULT
+    # Cardinality of the result set.
+    cardinality: enums.Cardinality = enums.Cardinality.NO_RESULT
 
     out_type_data: bytes = sertypes.NULL_TYPE_DESC
     out_type_id: bytes = sertypes.NULL_TYPE_ID.bytes
-    in_type_data: bytes = sertypes.NULL_TYPE_DESC
-    in_type_id: bytes = sertypes.NULL_TYPE_ID.bytes
-    in_type_args: Optional[List[Param]] = None
-    globals: Optional[List[str]] = None
 
     # Set only when this unit contains a CONFIGURE INSTANCE command.
     system_config: bool = False
@@ -273,8 +280,57 @@ class QueryUnit:
     global_schema: Optional[bytes] = None
 
     @property
-    def has_ddl(self) -> bool:
-        return bool(self.capabilities & enums.Capability.DDL)
+    def units(self) -> List[QueryUnit]:
+        return [self]
+
+
+@dataclasses.dataclass
+class QueryUnitGroup(BaseQueryUnit):
+
+    cacheable: bool = True
+    units: List[QueryUnit] = dataclasses.field(default_factory=list)
+
+    @property
+    def sql(self) -> Tuple[bytes, ...]:
+        return tuple(sql for unit in self.units for sql in unit.sql)
+
+    @property
+    def cardinality(self) -> enums.Cardinality:
+        return enums.Cardinality.NO_RESULT
+
+    @property
+    def out_type_data(self) -> bytes:
+        return sertypes.NULL_TYPE_DESC
+
+    @property
+    def out_type_id(self) -> bytes:
+        return sertypes.NULL_TYPE_ID.bytes
+
+    def append(self, query_unit: QueryUnit):
+        assert query_unit.cardinality == enums.Cardinality.NO_RESULT
+        assert query_unit.out_type_data == sertypes.NULL_TYPE_DESC
+        assert query_unit.out_type_id == sertypes.NULL_TYPE_ID.bytes
+
+        self.units.append(query_unit)
+        self.status = query_unit.status
+        if not query_unit.is_transactional:
+            self.is_transactional = False
+        self.capabilities |= query_unit.capabilities
+        if query_unit.has_set:
+            self.has_set = True
+        if query_unit.has_role_ddl:
+            self.has_role_ddl = True
+        if self.units:
+            self.sql_hash = b''
+            self.tx_commit = False
+            self.tx_rollback = self.tx_savepoint_rollback = False
+        else:
+            self.sql_hash = query_unit.sql_hash
+            self.tx_commit = query_unit.tx_commit
+            self.tx_rollback = query_unit.tx_rollback
+            self.tx_savepoint_rollback = query_unit.tx_savepoint_rollback
+        if not query_unit.cacheable:
+            self.cacheable = False
 
 
 #############################
