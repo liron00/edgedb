@@ -1739,27 +1739,18 @@ class Compiler:
             raise errors.ProtocolError('nothing to compile')
 
         units: list[dbstate.QueryUnit] = []
-        unit = None
 
         for stmt in statements:
             comp, capabilities = self._compile_dispatch_ql(
                 ctx, stmt, source=source if len(statements) == 1 else None)
 
-            if unit is not None:
-                if comp.single_unit:
-                    units.append(unit)
-                    unit = None
-
-            if unit is None:
-                unit = dbstate.QueryUnit(
-                    sql=(),
-                    status=status.get_status(stmt),
-                    cardinality=default_cardinality,
-                )
-            else:
-                unit.status = status.get_status(stmt)
-
-            unit.capabilities |= capabilities
+            unit = dbstate.QueryUnit(
+                sql=(),
+                status=status.get_status(stmt),
+                cardinality=default_cardinality,
+                capabilities=capabilities,
+            )
+            units.append(unit)
 
             if not comp.is_transactional:
                 if statements_len > 1:
@@ -1785,8 +1776,8 @@ class Compiler:
                 unit.is_transactional = False
 
             if isinstance(comp, dbstate.Query):
+                unit.sql = comp.sql
                 if single_stmt_mode:
-                    unit.sql = comp.sql
                     unit.sql_hash = comp.sql_hash
 
                     unit.out_type_data = comp.out_type_data
@@ -1799,15 +1790,13 @@ class Compiler:
                     unit.cacheable = comp.cacheable
 
                     unit.cardinality = comp.cardinality
-                else:
-                    unit.sql += comp.sql
 
             elif isinstance(comp, dbstate.SimpleQuery):
                 assert not single_stmt_mode
-                unit.sql += comp.sql
+                unit.sql = comp.sql
 
             elif isinstance(comp, dbstate.DDLQuery):
-                unit.sql += comp.sql
+                unit.sql = comp.sql
                 unit.create_db = comp.create_db
                 unit.drop_db = comp.drop_db
                 unit.create_db_template = comp.create_db_template
@@ -1821,12 +1810,8 @@ class Compiler:
                 if comp.global_schema is not None:
                     unit.global_schema = pickle.dumps(comp.global_schema, -1)
 
-                if comp.single_unit:
-                    units.append(unit)
-                    unit = None
-
             elif isinstance(comp, dbstate.TxControlQuery):
-                unit.sql += comp.sql
+                unit.sql = comp.sql
                 unit.cacheable = comp.cacheable
                 if comp.user_schema is not None:
                     unit.user_schema = pickle.dumps(comp.user_schema, -1)
@@ -1849,12 +1834,8 @@ class Compiler:
                 elif comp.action is dbstate.TxAction.ROLLBACK_TO_SAVEPOINT:
                     unit.tx_savepoint_rollback = True
 
-                if comp.single_unit:
-                    units.append(unit)
-                    unit = None
-
             elif isinstance(comp, dbstate.MigrationControlQuery):
-                unit.sql += comp.sql
+                unit.sql = comp.sql
                 unit.cacheable = comp.cacheable
                 if comp.user_schema is not None:
                     unit.user_schema = pickle.dumps(comp.user_schema, -1)
@@ -1878,12 +1859,8 @@ class Compiler:
                 elif comp.tx_action is dbstate.TxAction.ROLLBACK_TO_SAVEPOINT:
                     unit.tx_savepoint_rollback = True
 
-                if comp.single_unit:
-                    units.append(unit)
-                    unit = None
-
             elif isinstance(comp, dbstate.SessionStateQuery):
-                unit.sql += comp.sql
+                unit.sql = comp.sql
 
                 if comp.config_scope is qltypes.ConfigScope.INSTANCE:
                     if (not ctx.state.current_tx().is_implicit() or
@@ -1922,9 +1899,6 @@ class Compiler:
 
             else:  # pragma: no cover
                 raise errors.InternalServerError('unknown compile state')
-
-        if unit is not None:
-            units.append(unit)
 
         if single_stmt_mode:
             if len(units) != 1:  # pragma: no cover
